@@ -13,6 +13,7 @@ from .db import (
     claim_next_job,
     create_artifact,
     init_db,
+    release_job_resources,
     update_job,
     utc_now,
 )
@@ -29,7 +30,14 @@ class Worker:
             return False
 
         job_id = job["id"]
-        append_log(job_id, "INFO", f"Worker {self.worker_id} claimed job")
+        append_log(
+            job_id,
+            "INFO",
+            (
+                f"Worker {self.worker_id} claimed job on {job['allocated_node_id']} "
+                f"requested_gpus={job['requested_gpus']}"
+            ),
+        )
         try:
             result = run_training(job, lambda level, message: append_log(job_id, level, message))
             for artifact in result["artifacts"]:
@@ -60,6 +68,9 @@ class Worker:
                 finished_at=utc_now(),
                 error_message=error,
             )
+        finally:
+            release_job_resources(job_id)
+            append_log(job_id, "INFO", "Released scheduled GPU resources")
         return True
 
     def run_forever(self, poll_interval: float = 2.0) -> None:
@@ -88,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -16,8 +16,17 @@ from .db import (
     list_artifacts,
     list_jobs,
     list_logs,
+    scheduler_snapshot,
 )
-from .schemas import ArtifactResponse, JobCreate, JobListResponse, JobResponse, LogResponse
+from .schemas import (
+    ArtifactResponse,
+    ComputeNodeResponse,
+    JobCreate,
+    JobListResponse,
+    JobResponse,
+    LogResponse,
+    SchedulerResponse,
+)
 
 
 @asynccontextmanager
@@ -26,7 +35,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Mini AI Platform", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Mini AI Platform", version="0.2.0", lifespan=lifespan)
 
 
 def serialize_job(row: Dict[str, Any]) -> JobResponse:
@@ -34,6 +43,12 @@ def serialize_job(row: Dict[str, Any]) -> JobResponse:
     payload["hyperparameters"] = decode_json_field(row, "hyperparameters")
     payload["metrics"] = decode_json_field(row, "metrics")
     return JobResponse(**payload)
+
+
+def serialize_node(row: Dict[str, Any]) -> ComputeNodeResponse:
+    payload = dict(row)
+    payload["labels"] = decode_json_field(row, "labels")
+    return ComputeNodeResponse(**payload)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -54,6 +69,8 @@ def submit_job(request: JobCreate) -> JobResponse:
         dataset=request.dataset,
         model_type=request.model_type,
         hyperparameters=hyperparameters,
+        requested_gpus=request.requested_gpus,
+        priority=request.priority,
     )
     return serialize_job(job)
 
@@ -61,6 +78,19 @@ def submit_job(request: JobCreate) -> JobResponse:
 @app.get("/api/jobs", response_model=JobListResponse)
 def get_jobs() -> JobListResponse:
     return JobListResponse(jobs=[serialize_job(row) for row in list_jobs()])
+
+
+@app.get("/api/scheduler", response_model=SchedulerResponse)
+def get_scheduler() -> SchedulerResponse:
+    snapshot = scheduler_snapshot()
+    return SchedulerResponse(
+        nodes=[serialize_node(row) for row in snapshot["nodes"]],
+        queued_jobs=[serialize_job(row) for row in snapshot["queued_jobs"]],
+        running_jobs=[serialize_job(row) for row in snapshot["running_jobs"]],
+        total_gpus=snapshot["total_gpus"],
+        used_gpus=snapshot["used_gpus"],
+        available_gpus=snapshot["available_gpus"],
+    )
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -213,6 +243,24 @@ WEB_CONSOLE_HTML = """
       white-space: pre-wrap;
     }
     .artifact a { color: var(--blue); text-decoration: none; }
+    .node {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px;
+      margin-top: 8px;
+    }
+    .meter {
+      height: 8px;
+      border-radius: 999px;
+      background: #eaeef2;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .meter > span {
+      display: block;
+      height: 100%;
+      background: var(--blue);
+    }
     .muted { color: var(--muted); }
     @media (max-width: 900px) {
       main, .split { grid-template-columns: 1fr; }
@@ -238,12 +286,18 @@ WEB_CONSOLE_HTML = """
         <input id="samples" type="number" min="20" max="10000" value="256" />
         <label for="seed">Seed</label>
         <input id="seed" type="number" value="42" />
+        <label for="requested_gpus">Requested GPUs</label>
+        <input id="requested_gpus" type="number" min="1" max="8" value="1" />
+        <label for="priority">Priority</label>
+        <input id="priority" type="number" min="0" max="100" value="0" />
         <div class="toolbar" style="margin-top:16px">
           <button type="submit">Submit Job</button>
           <button class="secondary" type="button" id="refresh">Refresh</button>
         </div>
       </form>
       <p class="muted">Start a worker in another terminal with <code>./scripts/run_worker.sh</code>.</p>
+      <h2 style="margin-top:18px">Scheduler</h2>
+      <div id="scheduler" class="muted">Loading resources...</div>
     </section>
     <div class="split">
       <section>
@@ -256,6 +310,8 @@ WEB_CONSOLE_HTML = """
             <tr>
               <th style="width:160px">ID</th>
               <th>Name</th>
+              <th style="width:80px">GPUs</th>
+              <th style="width:110px">Node</th>
               <th style="width:120px">Status</th>
               <th style="width:130px">Accuracy</th>
             </tr>
@@ -288,6 +344,23 @@ function statusBadge(status) {
   return `<span class="badge ${status}">${status}</span>`;
 }
 
+async function refreshScheduler() {
+  const scheduler = await api('/api/scheduler');
+  const target = document.getElementById('scheduler');
+  target.innerHTML = `
+    <div><strong>${scheduler.used_gpus}/${scheduler.total_gpus}</strong> GPUs used</div>
+    <div class="muted">${scheduler.queued_jobs.length} queued, ${scheduler.running_jobs.length} running</div>
+    ${scheduler.nodes.map(node => {
+      const pct = node.total_gpus ? Math.round((node.used_gpus / node.total_gpus) * 100) : 0;
+      return `<div class="node">
+        <div><strong>${node.name}</strong> <span class="badge">${node.status}</span></div>
+        <div>${node.used_gpus}/${node.total_gpus} GPUs used</div>
+        <div class="meter"><span style="width:${pct}%"></span></div>
+      </div>`;
+    }).join('')}
+  `;
+}
+
 async function refreshJobs() {
   const data = await api('/api/jobs');
   const tbody = document.getElementById('jobs');
@@ -297,6 +370,8 @@ async function refreshJobs() {
     return `<tr data-job-id="${job.id}" data-selected="${job.id === selectedJobId}">
       <td><button class="secondary" data-open="${job.id}">${job.id}</button></td>
       <td>${job.name}</td>
+      <td>${job.requested_gpus}</td>
+      <td>${job.allocated_node_id || '-'}</td>
       <td>${statusBadge(job.status)}</td>
       <td>${accuracy}</td>
     </tr>`;
@@ -306,6 +381,7 @@ async function refreshJobs() {
   });
   if (!selectedJobId && data.jobs.length) await selectJob(data.jobs[0].id);
   if (selectedJobId) await refreshSelected();
+  await refreshScheduler();
 }
 
 async function selectJob(jobId) {
@@ -322,6 +398,9 @@ async function refreshSelected() {
     <div><strong>${job.name}</strong></div>
     <div>ID: ${job.id}</div>
     <div>Status: ${statusBadge(job.status)}</div>
+    <div>GPUs: ${job.requested_gpus}</div>
+    <div>Priority: ${job.priority}</div>
+    <div>Node: ${job.allocated_node_id || '-'}</div>
     <div>Dataset: ${job.dataset}</div>
     <div>Model: ${job.model_type}</div>
     <div>Created: ${job.created_at}</div>
@@ -345,7 +424,9 @@ document.getElementById('job-form').addEventListener('submit', async (event) => 
     epochs: Number(document.getElementById('epochs').value),
     learning_rate: Number(document.getElementById('learning_rate').value),
     samples: Number(document.getElementById('samples').value),
-    seed: Number(document.getElementById('seed').value)
+    seed: Number(document.getElementById('seed').value),
+    requested_gpus: Number(document.getElementById('requested_gpus').value),
+    priority: Number(document.getElementById('priority').value)
   };
   const job = await api('/api/jobs', {
     method: 'POST',

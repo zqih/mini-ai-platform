@@ -22,6 +22,7 @@ def test_api_submit_job_then_worker_completes(monkeypatch, tmp_path):
         assert response.status_code == 200
         job = response.json()
         assert job["status"] == "QUEUED"
+        assert job["requested_gpus"] == 1
 
         assert Worker(worker_id="api-test-worker").run_once() is True
 
@@ -30,6 +31,15 @@ def test_api_submit_job_then_worker_completes(monkeypatch, tmp_path):
         completed = job_response.json()
         assert completed["status"] == "SUCCEEDED"
         assert completed["metrics"]["accuracy"] >= 0.75
+        assert completed["allocated_node_id"] == "node-c"
+        assert completed["resources_released_at"] is not None
+
+        scheduler_response = client.get("/api/scheduler")
+        assert scheduler_response.status_code == 200
+        scheduler = scheduler_response.json()
+        assert scheduler["total_gpus"] == 14
+        assert scheduler["used_gpus"] == 0
+        assert len(scheduler["nodes"]) == 3
 
         logs_response = client.get(f"/api/jobs/{job['id']}/logs")
         assert logs_response.status_code == 200

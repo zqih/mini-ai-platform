@@ -18,7 +18,14 @@ def main() -> None:
         os.environ["MINI_AI_PLATFORM_STORAGE"] = str(tmpdir / "storage")
         os.environ["MINI_AI_PLATFORM_DB"] = str(tmpdir / "platform.db")
 
-        from mini_ai_platform.db import create_job, get_job, init_db, list_artifacts, list_logs
+        from mini_ai_platform.db import (
+            create_job,
+            get_job,
+            init_db,
+            list_artifacts,
+            list_logs,
+            scheduler_snapshot,
+        )
         from mini_ai_platform.worker import Worker
 
         init_db()
@@ -27,6 +34,7 @@ def main() -> None:
             dataset="synthetic-digits",
             model_type="logistic-regression",
             hyperparameters={"epochs": 4, "learning_rate": 0.35, "samples": 120, "seed": 7},
+            requested_gpus=2,
         )
         assert job["status"] == "QUEUED"
 
@@ -36,8 +44,15 @@ def main() -> None:
         completed = get_job(job["id"])
         assert completed is not None
         assert completed["status"] == "SUCCEEDED", completed
+        assert completed["requested_gpus"] == 2
+        assert completed["allocated_node_id"] == "node-c"
+        assert completed["resources_released_at"] is not None
         metrics = json.loads(completed["metrics"])
         assert metrics["accuracy"] >= 0.8, metrics
+
+        scheduler = scheduler_snapshot()
+        assert scheduler["used_gpus"] == 0
+        assert scheduler["available_gpus"] == scheduler["total_gpus"]
 
         logs = list_logs(job["id"])
         assert any("epoch=4/4" in row["message"] for row in logs)
@@ -47,7 +62,10 @@ def main() -> None:
         assert {"model.json", "metrics.json", "checkpoint_epoch_4.json"} <= artifact_names
 
         print("smoke test passed")
-        print(f"job_id={job['id']} accuracy={metrics['accuracy']} artifacts={len(artifacts)}")
+        print(
+            f"job_id={job['id']} accuracy={metrics['accuracy']} "
+            f"node={completed['allocated_node_id']} artifacts={len(artifacts)}"
+        )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
