@@ -1,0 +1,18 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime state
+storage/*.db
+storage/*.db-*
+storage/artifacts/*
+storage/logs/*
+storage/models/*
+storage/datasets/*
+!storage/artifacts/.gitkeep
+!storage/logs/.gitkeep
+!storage/models/.gitkeep
+!storage/datasets/.gitkeep
+
